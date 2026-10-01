@@ -8,7 +8,7 @@ echo       Git Standard Development Branch Creator
 echo ======================================================
 echo.
 
-:: 1. Check Git Installation
+:: 1. Verify Git Installation
 where git >nul 2>&1
 if errorlevel 1 goto :ERR_NO_GIT
 
@@ -18,7 +18,7 @@ for %%I in ("%~dp0..\..") do (
     set "DEFAULT_PROJ=%%~nxI"
 )
 
-:: 3. Directory and Project Selection
+:: 3. Target Workspace Configuration
 echo [1/5] Target Workspace Configuration
 echo Default directory : !DEFAULT_DIR!
 set "TARGET_DIR="
@@ -32,7 +32,6 @@ set /p "TARGET_PROJ=Enter project folder name [Press ENTER for default]: "
 if "!TARGET_PROJ!"=="" set "TARGET_PROJ=!DEFAULT_PROJ!"
 set "TARGET_PROJ=!TARGET_PROJ:"=!"
 
-:: Smart Path Resolution (Avoid duplicate nesting)
 set "FULL_PATH=!TARGET_DIR!\!TARGET_PROJ!"
 if not exist "!FULL_PATH!" (
     for %%P in ("!TARGET_DIR!") do set "CUR_FOLDER=%%~nxP"
@@ -44,7 +43,6 @@ if not exist "!FULL_PATH!" (
 )
 
 if not exist "!FULL_PATH!" goto :ERR_NO_DIR
-
 cd /d "!FULL_PATH!" || goto :ERR_ACCESS_DIR
 
 git rev-parse --is-inside-work-tree >nul 2>&1
@@ -77,51 +75,68 @@ set /p "TYPE_CHOICE=Select prefix option [1-6] (Default: 1): "
 if "!TYPE_CHOICE!"=="" set "TYPE_CHOICE=1"
 
 set "PREFIX=feature/"
-if "!TYPE_CHOICE!"=="2" set "PREFIX=bugfix/"
-if "!TYPE_CHOICE!"=="3" set "PREFIX=hotfix/"
-if "!TYPE_CHOICE!"=="4" set "PREFIX=refactor/"
-if "!TYPE_CHOICE!"=="5" set "PREFIX=test/"
-if "!TYPE_CHOICE!"=="6" set "PREFIX="
+set "PARENT_PREFIX=feature"
+if "!TYPE_CHOICE!"=="2" (set "PREFIX=bugfix/" & set "PARENT_PREFIX=bugfix")
+if "!TYPE_CHOICE!"=="3" (set "PREFIX=hotfix/" & set "PARENT_PREFIX=hotfix")
+if "!TYPE_CHOICE!"=="4" (set "PREFIX=refactor/" & set "PARENT_PREFIX=refactor")
+if "!TYPE_CHOICE!"=="5" (set "PREFIX=test/" & set "PARENT_PREFIX=test")
+if "!TYPE_CHOICE!"=="6" (set "PREFIX=" & set "PARENT_PREFIX=")
+
+:: Check for conflicting parent branch name (e.g. branch 'test' blocking 'test/xxx')
+if defined PARENT_PREFIX (
+    git show-ref --verify --quiet refs/heads/!PARENT_PREFIX!
+    if not errorlevel 1 goto :ERR_PARENT_EXISTS
+)
 
 :PROMPT_BRANCH_DESC
 echo.
 echo [3/5] Branch Identifier / Description:
 set "BRANCH_DESC="
-set /p "BRANCH_DESC=Enter branch description (e.g. auth-token-v2 / fix-login-crash): "
+set /p "BRANCH_DESC=Enter branch description (e.g. auth-token-v2 / test-1): "
 if "!BRANCH_DESC!"=="" set "BRANCH_DESC=dev-patch"
 
-:: Sanitize branch name: replace spaces with hyphens, remove quotes
 set "BRANCH_DESC=!BRANCH_DESC:"=!"
 set "BRANCH_DESC=!BRANCH_DESC: =-!"
-
 set "NEW_BRANCH=!PREFIX!!BRANCH_DESC!"
 
-:: Check if branch already exists locally
-git rev-parse --verify "!NEW_BRANCH!" >nul 2>&1
-if not errorlevel 1 (
-    echo.
-    echo [WARNING] Branch '!NEW_BRANCH!' already exists locally!
-    echo   [1] Choose another branch name (Default)
-    echo   [2] Switch directly to existing '!NEW_BRANCH!'
-    set "EXIST_CHOICE="
-    set /p "EXIST_CHOICE=Select option [1/2] (Default: 1): "
-    if "!EXIST_CHOICE!"=="2" (
-        git checkout "!NEW_BRANCH!"
-        goto :BRANCH_CHECKOUT_DONE
-    )
-    goto :PROMPT_BRANCH_DESC
-)
+:: Check if target branch already exists locally (Jump pattern eliminates paren bugs)
+git show-ref --verify --quiet refs/heads/!NEW_BRANCH!
+if errorlevel 1 goto :BRANCH_DOES_NOT_EXIST
 
-:: Create and switch to new branch from current commit
+:: If branch exists, show warning and options
+echo.
+echo [WARNING] Branch '!NEW_BRANCH!' already exists locally!
+echo   [1] Choose another branch name [Default]
+echo   [2] Switch directly to existing '!NEW_BRANCH!'
+set "EXIST_CHOICE="
+set /p "EXIST_CHOICE=Select option [1/2] [Default: 1]: "
+if "!EXIST_CHOICE!"=="2" (
+    git checkout "!NEW_BRANCH!"
+    if errorlevel 1 goto :ERR_BRANCH_CREATE
+    goto :BRANCH_CHECKOUT_VERIFY
+)
+goto :PROMPT_BRANCH_DESC
+
+:BRANCH_DOES_NOT_EXIST
 echo.
 echo Creating and switching to branch '!NEW_BRANCH!'...
 git checkout -b "!NEW_BRANCH!"
 if errorlevel 1 goto :ERR_BRANCH_CREATE
 
-:BRANCH_CHECKOUT_DONE
+:BRANCH_CHECKOUT_VERIFY
+:: Strict verification: Ensure Git really switched to target branch
+set "ACTUAL_BRANCH="
+for /f "delims=" %%B in ('git branch --show-current 2^>nul') do set "ACTUAL_BRANCH=%%B"
+if not "!ACTUAL_BRANCH!"=="!NEW_BRANCH!" (
+    echo.
+    echo [CRITICAL ERROR] Failed to switch branch! Current branch is still '!ACTUAL_BRANCH!'.
+    echo Operation aborted to protect your current branch.
+    goto :SCRIPT_FAIL
+)
+
 echo.
 echo ======================================================
-echo [OK] Successfully switched to branch: !NEW_BRANCH!
+echo [OK] Verified active branch: !ACTUAL_BRANCH!
 echo ======================================================
 
 :: 6. Commit Message & Working Tree Handling
@@ -130,48 +145,57 @@ echo [4/5] Commit Message Configuration
 set "DEFAULT_COMMIT=!PREFIX!!BRANCH_DESC!: initialize development branch"
 echo Default Commit Message: "!DEFAULT_COMMIT!"
 set "COMMIT_MSG="
-set /p "COMMIT_MSG=Enter commit message (Press ENTER for default): "
+set /p "COMMIT_MSG=Enter commit message [Press ENTER for default]: "
 if "!COMMIT_MSG!"=="" set "COMMIT_MSG=!DEFAULT_COMMIT!"
 set "COMMIT_MSG=!COMMIT_MSG:"=!"
 
-:: Check for uncommitted changes in working directory
 set "HAS_UNCOMMITTED=0"
 for /f "delims=" %%S in ('git status --porcelain 2^>nul') do set "HAS_UNCOMMITTED=1"
 
-if "!HAS_UNCOMMITTED!"=="1" (
-    echo.
-    echo [NOTICE] Uncommitted local modifications detected.
-    set /p "DO_COMMIT=Stage and commit these changes now? [Y/N] (Default: Y): "
-    if /i not "!DO_COMMIT!"=="N" (
-        echo Staging all changes...
-        git add -A
-        git commit -m "!COMMIT_MSG!"
-        echo [OK] Changes committed.
-    )
-) else (
+if "!HAS_UNCOMMITTED!"=="0" (
     echo.
     echo Local working tree is clean. No uncommitted modifications.
+    goto :STEP_REMOTE_PUSH
 )
 
+echo.
+echo [NOTICE] Uncommitted local modifications detected.
+set "DO_COMMIT="
+set /p "DO_COMMIT=Stage and commit these changes now? [Y/N] [Default: Y]: "
+if /i "!DO_COMMIT!"=="N" goto :STEP_REMOTE_PUSH
+
+echo Staging all changes...
+git add -A
+git commit -m "!COMMIT_MSG!"
+if errorlevel 1 (
+    echo [ERROR] Git commit failed!
+    goto :SCRIPT_FAIL
+)
+echo [OK] Changes committed to '!NEW_BRANCH!'.
+
+:STEP_REMOTE_PUSH
 :: 7. Remote Push Option
 echo.
 echo [5/5] Remote Synchronization
 set "PUSH_CHOICE="
-set /p "PUSH_CHOICE=Publish and push '!NEW_BRANCH!' to remote origin? [Y/N] (Default: N): "
-if /i "!PUSH_CHOICE!"=="Y" (
-    echo Pushing new branch to origin...
-    git push -u origin "!NEW_BRANCH!"
-    if errorlevel 1 (
-        echo [WARNING] Failed to push to remote. Please verify remote repository connectivity.
-    ) else (
-        echo [OK] Remote branch created and tracking established.
-    )
+set /p "PUSH_CHOICE=Publish and push '!NEW_BRANCH!' to remote origin? [Y/N] [Default: N]: "
+if /i not "!PUSH_CHOICE!"=="Y" goto :ALL_SUCCESS
+
+echo Pushing new branch to origin...
+git push -u origin "!NEW_BRANCH!"
+if errorlevel 1 (
+    echo.
+    echo [WARNING] Failed to push to remote origin.
+    echo Check network or authentication permissions.
+) else (
+    echo [OK] Remote branch created and tracking established.
 )
 
+:ALL_SUCCESS
 echo.
 echo ======================================================
-echo [SUCCESS] Branch ready for development!
-echo Active Branch : !NEW_BRANCH!
+echo [SUCCESS] Branch ready for development
+echo Active Branch : !ACTUAL_BRANCH!
 echo Latest Commit :
 git log -1 --oneline
 echo ======================================================
@@ -179,29 +203,36 @@ goto :FINISH
 
 :: --- Error Handlers ---
 
+:ERR_PARENT_EXISTS
+echo.
+echo [ERROR] Conflicting parent branch '!PARENT_PREFIX!' exists locally!
+echo Git cannot create '!PREFIX!xxx' while branch '!PARENT_PREFIX!' exists.
+echo Please run: git branch -D !PARENT_PREFIX!
+goto :SCRIPT_FAIL
+
 :ERR_NO_GIT
-echo [ERROR] Git command not found. Please ensure Git is installed and in PATH.
-goto :FINISH
+echo [ERROR] Git command not found.
+goto :SCRIPT_FAIL
 
 :ERR_NO_DIR
-echo.
 echo [ERROR] Target directory not found: !FULL_PATH!
-goto :FINISH
+goto :SCRIPT_FAIL
 
 :ERR_ACCESS_DIR
-echo.
 echo [ERROR] Unable to access target directory: !FULL_PATH!
-goto :FINISH
+goto :SCRIPT_FAIL
 
 :ERR_NOT_GIT
-echo.
 echo [ERROR] The directory is not a valid Git repository: !FULL_PATH!
-goto :FINISH
+goto :SCRIPT_FAIL
 
 :ERR_BRANCH_CREATE
+echo [ERROR] Git failed to create or checkout branch '!NEW_BRANCH!'.
+goto :SCRIPT_FAIL
+
+:SCRIPT_FAIL
 echo.
-echo [ERROR] Failed to create branch '!NEW_BRANCH!'. Check Git status.
-goto :FINISH
+echo Execution terminated with errors.
 
 :FINISH
 echo.
