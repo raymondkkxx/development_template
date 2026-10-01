@@ -60,24 +60,21 @@ echo Active Directory  : !FULL_PATH!
 echo ======================================================
 echo.
 
-:: 4. Branch Detection and Preview
+:: 4. Automatic Branch Detection (No manual prompt)
 echo [2/6] Branch Detection
 set "LOCAL_BRANCH="
 for /f "delims=" %%B in ('git branch --show-current 2^>nul') do set "LOCAL_BRANCH=%%B"
 
 if "!LOCAL_BRANCH!"=="" goto :ERR_DETACHED_HEAD
 
-echo Local Active Branch: !LOCAL_BRANCH!
-set "TARGET_BRANCH="
-set /p "TARGET_BRANCH=Enter remote target branch [Press ENTER for '!LOCAL_BRANCH!']: "
-if "!TARGET_BRANCH!"=="" set "TARGET_BRANCH=!LOCAL_BRANCH!"
-set "TARGET_BRANCH=!TARGET_BRANCH:"=!"
+:: Auto bind target branch to match local branch
+set "TARGET_BRANCH=!LOCAL_BRANCH!"
 
 echo.
 echo ======================================================
-echo [PUSH PREVIEW]
-echo   Local Branch  : !LOCAL_BRANCH!
-echo   Remote Target : origin/!TARGET_BRANCH!
+echo [BRANCH SYNC INFO]
+echo   Current Local Branch : !LOCAL_BRANCH!
+echo   Target Remote Branch : origin/!TARGET_BRANCH!
 echo ======================================================
 echo.
 
